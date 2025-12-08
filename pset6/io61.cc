@@ -27,8 +27,12 @@ struct io61_file {
     off_t end_tag;   // offset one past last valid character in `cbuf`
 
     // Positioned mode
-    bool dirty = false;       // has cache been written?
+    // make this an atomic type
+    std::atomic <bool> dirty{false};       // has cache been written?
     bool positioned = false;  // is cache in positioned mode?
+
+    // add the recursive mutex object
+    std::recursive_mutex file_mutex;
 };
 
 
@@ -379,7 +383,12 @@ int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
     if (len == 0) {
         return 0;
     }
-    return 0;
+    if (f->file_mutex.try_lock()){
+        return 0;
+    }
+    else{
+        return -1;
+    }
 }
 
 
@@ -401,6 +410,7 @@ int io61_lock(io61_file* f, off_t off, off_t len, int locktype) {
     }
     // The handout code polls using `io61_try_lock`.
     while (io61_try_lock(f, off, len, locktype) != 0) {
+        
     }
     return 0;
 }
@@ -417,6 +427,8 @@ int io61_unlock(io61_file* f, off_t off, off_t len) {
     if (len == 0) {
         return 0;
     }
+    // no need to account for undefined behaviour
+    f->file_mutex.unlock();
     return 0;
 }
 

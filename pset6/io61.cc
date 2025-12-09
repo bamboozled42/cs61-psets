@@ -10,71 +10,81 @@
 // io61.cc
 //    YOUR CODE HERE!
 
-
 // io61_file
 //    Data structure for io61 file wrappers.
 
-struct range_lock{
-    off_t off; 
+struct range_lock
+{
+    off_t off;
     off_t len;
     std::thread::id thread_id;
 };
 
-
-struct io61_file {
-    int fd = -1;     // file descriptor
-    int mode;        // O_RDONLY, O_WRONLY, or O_RDWR
-    bool seekable;   // is this file seekable?
+struct io61_file
+{
+    int fd = -1;   // file descriptor
+    int mode;      // O_RDONLY, O_WRONLY, or O_RDWR
+    bool seekable; // is this file seekable?
 
     // Single-slot cache
     static constexpr off_t cbufsz = 8192;
     unsigned char cbuf[cbufsz];
-    off_t tag;       // offset of first character in `cbuf`
-    off_t pos_tag;   // next offset to read or write (non-positioned mode)
-    off_t end_tag;   // offset one past last valid character in `cbuf`
+    off_t tag;     // offset of first character in `cbuf`
+    off_t pos_tag; // next offset to read or write (non-positioned mode)
+    off_t end_tag; // offset one past last valid character in `cbuf`
 
     // Positioned mode
     // make this an atomic type
-    std::atomic <bool> dirty{false};       // has cache been written?
-    bool positioned = false;  // is cache in positioned mode?
+    std::atomic<bool> dirty{false}; // has cache been written?
+    bool positioned = false;        // is cache in positioned mode?
 
     // no need for recursive mutex for a table
     std::mutex table_mutex;
     // make a condition variable
     std::condition_variable_any run_threads;
     std::vector<range_lock> lock_table;
+
+    // add mutex for read/ write operations
+    std::mutex rw_mutex;
 };
 
 // add a helper function to check if it falls within a range
-bool range_checker(range_lock existing_range, off_t curr_off, off_t curr_len){
+bool range_checker(range_lock existing_range, off_t curr_off, off_t curr_len)
+{
     off_t curr_end = curr_off + curr_len;
     off_t existing_end = existing_range.off + existing_range.len;
 
     // no overlap condition
-    if (curr_end <= existing_range.off || existing_end <= curr_off) {
-        return false;   
-    } else {
+    if (curr_end <= existing_range.off || existing_end <= curr_off)
+    {
+        return false;
+    }
+    else
+    {
         return true;
     }
 }
-
 
 // io61_fdopen(fd, mode)
 //    Returns a new io61_file for file descriptor `fd`. `mode` is either
 //    O_RDONLY for a read-only file, O_WRONLY for a write-only file,
 //    or O_RDWR for a read/write file.
 
-io61_file* io61_fdopen(int fd, int mode) {
+io61_file *io61_fdopen(int fd, int mode)
+{
     assert(fd >= 0);
     assert((mode & O_APPEND) == 0);
-    io61_file* f = new io61_file;
+    io61_file *f = new io61_file;
     f->fd = fd;
     f->mode = mode & O_ACCMODE;
     off_t off = lseek(fd, 0, SEEK_CUR);
-    if (off != -1) {
+    if (off != -1)
+    {
         f->seekable = true;
         f->tag = f->pos_tag = f->end_tag = off;
-    } else {
+    }
+    else
+    {
         f->seekable = false;
         f->tag = f->pos_tag = f->end_tag = 0;
     }
@@ -82,17 +92,16 @@ io61_file* io61_fdopen(int fd, int mode) {
     return f;
 }
 
-
 // io61_close(f)
 //    Closes the io61_file `f` and releases all its resources.
 
-int io61_close(io61_file* f) {
+int io61_close(io61_file *f)
+{
     io61_flush(f);
     int r = close(f->fd);
     delete f;
     return r;
 }
-
 
 // NORMAL READING AND WRITING FUNCTIONS
 
@@ -100,13 +109,19 @@ int io61_close(io61_file* f) {
 //    Reads a single (unsigned) byte from `f` and returns it. Returns EOF,
 //    which equals -1, on end of file or error.
 
-static int io61_fill(io61_file* f);
+static int io61_fill(io61_file *f);
+// declare new function
+int io61_flush_internal(io61_file *f);
 
-int io61_readc(io61_file* f) {
-    assert(!f->positioned);
-    if (f->pos_tag == f->end_tag) {
+int io61_readc(io61_file *f)
+{
+    // set a mutex lock here
+    std::unique_lock<std::mutex> guard(f->rw_mutex);
+    if (f->pos_tag == f->end_tag)
+    {
         io61_fill(f);
-        if (f->pos_tag == f->end_tag) {
+        if (f->pos_tag == f->end_tag)
+        {
             return -1;
         }
     }
@@ -114,7 +129,6 @@ int io61_readc(io61_file* f) {
     ++f->pos_tag;
     return ch;
 }
-
 
 // io61_read(f, buf, sz)
 //    Reads up to `sz` bytes from `f` into `buf`. Returns the number of
@@ -126,15 +140,22 @@ int io61_readc(io61_file* f) {
 //    if end-of-file or error is encountered before all `sz` bytes are read.
 //    This is called a “short read.”
 
-ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz) {
-    assert(!f->positioned);
+ssize_t io61_read(io61_file *f, unsigned char *buf, size_t sz)
+{
+    // set a mutex lock here
+    std::unique_lock<std::mutex> guard(f->rw_mutex);
     size_t nread = 0;
-    while (nread != sz) {
-        if (f->pos_tag == f->end_tag) {
+    while (nread != sz)
+    {
+        if (f->pos_tag == f->end_tag)
+        {
             int r = io61_fill(f);
-            if (r == -1 && nread == 0) {
+            if (r == -1 && nread == 0)
+            {
                 return -1;
-            } else if (f->pos_tag == f->end_tag) {
+            }
+            else if (f->pos_tag == f->end_tag)
+            {
                 break;
             }
         }
@@ -147,16 +168,19 @@ ssize_t io61_read(io61_file* f, unsigned char* buf, size_t sz) {
     return nread;
 }
 
-
 // io61_writec(f)
 //    Write a single character `c` to `f` (converted to unsigned char).
 //    Returns 0 on success and -1 on error.
 
-int io61_writec(io61_file* f, int c) {
-    assert(!f->positioned);
-    if (f->pos_tag == f->tag + f->cbufsz) {
-        int r = io61_flush(f);
-        if (r == -1) {
+int io61_writec(io61_file *f, int c)
+{
+    // set a mutex lock here
+    std::unique_lock<std::mutex> guard(f->rw_mutex);
+    if (f->pos_tag == f->tag + f->cbufsz)
+    {
+        int r = io61_flush_internal(f);
+        if (r == -1)
+        {
             return -1;
         }
     }
@@ -167,7 +191,6 @@ int io61_writec(io61_file* f, int c) {
     return 0;
 }
 
-
 // io61_write(f, buf, sz)
 //    Writes `sz` characters from `buf` to `f`. Returns `sz` on success.
 //    Can write fewer than `sz` characters when there is an error, such as
@@ -175,15 +198,22 @@ int io61_writec(io61_file* f, int c) {
 //    number of characters written, or -1 if no characters were written
 //    before the error occurred.
 
-ssize_t io61_write(io61_file* f, const unsigned char* buf, size_t sz) {
-    assert(!f->positioned);
+ssize_t io61_write(io61_file *f, const unsigned char *buf, size_t sz)
+{
+    // set a mutex lock here
+    std::unique_lock<std::mutex> guard(f->rw_mutex);
     size_t nwritten = 0;
-    while (nwritten != sz) {
-        if (f->end_tag == f->tag + f->cbufsz) {
-            int r = io61_flush(f);
-            if (r == -1 && nwritten == 0) {
+    while (nwritten != sz)
+    {
+        if (f->end_tag == f->tag + f->cbufsz)
+        {
+            int r = io61_flush_internal(f);
+            if (r == -1 && nwritten == 0)
+            {
                 return -1;
-            } else if (r == -1) {
+            }
+            else if (r == -1)
+            {
                 break;
             }
         }
@@ -198,7 +228,6 @@ ssize_t io61_write(io61_file* f, const unsigned char* buf, size_t sz) {
     return nwritten;
 }
 
-
 // io61_flush(f)
 //    If `f` was opened for writes, `io61_flush(f)` forces a write of any
 //    cached data written to `f`. Returns 0 on success; returns -1 if an error
@@ -207,32 +236,51 @@ ssize_t io61_write(io61_file* f, const unsigned char* buf, size_t sz) {
 //    If `f` was opened read-only and is seekable, `io61_flush(f)` drops any
 //    data cached for reading and seeks to the logical file position.
 
-static int io61_flush_dirty(io61_file* f);
-static int io61_flush_dirty_positioned(io61_file* f);
-static int io61_flush_clean(io61_file* f);
+static int io61_flush_dirty(io61_file *f);
+static int io61_flush_dirty_positioned(io61_file *f);
+static int io61_flush_clean(io61_file *f);
 
-int io61_flush(io61_file* f) {
-    if (f->dirty && f->positioned) {
+// create a flush that can be called internally from within a locked function
+int io61_flush_internal(io61_file *f)
+{
+    // don't set a mutex lock here
+    if (f->dirty && f->positioned)
+    {
         return io61_flush_dirty_positioned(f);
-    } else if (f->dirty) {
+    }
+    else if (f->dirty)
+    {
         return io61_flush_dirty(f);
-    } else {
+    }
+    else
+    {
         return io61_flush_clean(f);
     }
 }
 
+int io61_flush(io61_file *f)
+{
+    // set a mutex lock here
+    std::unique_lock<std::mutex> guard(f->rw_mutex);
+    return io61_flush_internal(f);
+}
 
 // io61_seek(f, off)
 //    Changes the file pointer for file `f` to `off` bytes into the file.
 //    Returns 0 on success and -1 on failure.
 
-int io61_seek(io61_file* f, off_t off) {
-    int r = io61_flush(f);
-    if (r == -1) {
+int io61_seek(io61_file *f, off_t off)
+{
+    // set a mutex lock here
+    std::unique_lock<std::mutex> guard(f->rw_mutex);
+    int r = io61_flush_internal(f);
+    if (r == -1)
+    {
         return -1;
     }
     off_t roff = lseek(f->fd, off, SEEK_SET);
-    if (roff == -1) {
+    if (roff == -1)
+    {
         return -1;
     }
     f->tag = f->pos_tag = f->end_tag = off;
@@ -240,21 +288,25 @@ int io61_seek(io61_file* f, off_t off) {
     return 0;
 }
 
-
 // Helper functions
 
 // io61_fill(f)
 //    Fill the cache by reading from the file. Returns 0 on success,
 //    -1 on error. Used only for non-positioned files.
 
-static int io61_fill(io61_file* f) {
+static int io61_fill(io61_file *f)
+{
     assert(f->tag == f->end_tag && f->pos_tag == f->end_tag);
     ssize_t nr;
-    while (true) {
+    while (true)
+    {
         nr = read(f->fd, f->cbuf, f->cbufsz);
-        if (nr >= 0) {
+        if (nr >= 0)
+        {
             break;
-        } else if (errno != EINTR && errno != EAGAIN) {
+        }
+        else if (errno != EINTR && errno != EAGAIN)
+        {
             return -1;
         }
     }
@@ -262,20 +314,24 @@ static int io61_fill(io61_file* f) {
     return 0;
 }
 
-
 // io61_flush_*(f)
 //    Helper functions for io61_flush.
 
-static int io61_flush_dirty(io61_file* f) {
+static int io61_flush_dirty(io61_file *f)
+{
     // Called when `f`’s cache is dirty and not positioned.
     // Uses `write`; assumes that the initial file position equals `f->tag`.
     off_t flush_tag = f->tag;
-    while (flush_tag != f->end_tag) {
+    while (flush_tag != f->end_tag)
+    {
         ssize_t nw = write(f->fd, &f->cbuf[flush_tag - f->tag],
                            f->end_tag - flush_tag);
-        if (nw >= 0) {
+        if (nw >= 0)
+        {
             flush_tag += nw;
-        } else if (errno != EINTR && errno != EINVAL) {
+        }
+        else if (errno != EINTR && errno != EINVAL)
+        {
             return -1;
         }
     }
@@ -284,16 +340,21 @@ static int io61_flush_dirty(io61_file* f) {
     return 0;
 }
 
-static int io61_flush_dirty_positioned(io61_file* f) {
+static int io61_flush_dirty_positioned(io61_file *f)
+{
     // Called when `f`’s cache is dirty and positioned.
     // Uses `pwrite`; does not change file position.
     off_t flush_tag = f->tag;
-    while (flush_tag != f->end_tag) {
+    while (flush_tag != f->end_tag)
+    {
         ssize_t nw = pwrite(f->fd, &f->cbuf[flush_tag - f->tag],
                             f->end_tag - flush_tag, flush_tag);
-        if (nw >= 0) {
+        if (nw >= 0)
+        {
             flush_tag += nw;
-        } else if (errno != EINTR && errno != EINVAL) {
+        }
+        else if (errno != EINTR && errno != EINVAL)
+        {
             return -1;
         }
     }
@@ -301,18 +362,19 @@ static int io61_flush_dirty_positioned(io61_file* f) {
     return 0;
 }
 
-static int io61_flush_clean(io61_file* f) {
+static int io61_flush_clean(io61_file *f)
+{
     // Called when `f`’s cache is clean.
-    if (!f->positioned && f->seekable) {
-        if (lseek(f->fd, f->pos_tag, SEEK_SET) == -1) {
+    if (!f->positioned && f->seekable)
+    {
+        if (lseek(f->fd, f->pos_tag, SEEK_SET) == -1)
+        {
             return -1;
         }
         f->tag = f->end_tag = f->pos_tag;
     }
     return 0;
 }
-
-
 
 // POSITIONED I/O FUNCTIONS
 
@@ -323,12 +385,17 @@ static int io61_flush_clean(io61_file* f) {
 //    This function can only be called when `f` was opened in read/write
 //    more (O_RDWR).
 
-static int io61_pfill(io61_file* f, off_t off);
+static int io61_pfill(io61_file *f, off_t off);
 
-ssize_t io61_pread(io61_file* f, unsigned char* buf, size_t sz,
-                   off_t off) {
-    if (!f->positioned || off < f->tag || off >= f->end_tag) {
-        if (io61_pfill(f, off) == -1) {
+ssize_t io61_pread(io61_file *f, unsigned char *buf, size_t sz,
+                   off_t off)
+{
+    // set a mutex lock here
+    std::unique_lock<std::mutex> guard(f->rw_mutex);
+    if (!f->positioned || off < f->tag || off >= f->end_tag)
+    {
+        if (io61_pfill(f, off) == -1)
+        {
             return -1;
         }
     }
@@ -338,7 +405,6 @@ ssize_t io61_pread(io61_file* f, unsigned char* buf, size_t sz,
     return ncopy;
 }
 
-
 // io61_pwrite(f, buf, sz, off)
 //    Write up to `sz` bytes from `buf` into `f`, starting at offset `off`.
 //    Returns the number of characters written or -1 on error.
@@ -346,10 +412,15 @@ ssize_t io61_pread(io61_file* f, unsigned char* buf, size_t sz,
 //    This function can only be called when `f` was opened in read/write
 //    more (O_RDWR).
 
-ssize_t io61_pwrite(io61_file* f, const unsigned char* buf, size_t sz,
-                    off_t off) {
-    if (!f->positioned || off < f->tag || off >= f->end_tag) {
-        if (io61_pfill(f, off) == -1) {
+ssize_t io61_pwrite(io61_file *f, const unsigned char *buf, size_t sz,
+                    off_t off)
+{
+    // set a mutex lock here
+    std::unique_lock<std::mutex> guard(f->rw_mutex);
+    if (!f->positioned || off < f->tag || off >= f->end_tag)
+    {
+        if (io61_pfill(f, off) == -1)
+        {
             return -1;
         }
     }
@@ -360,20 +431,23 @@ ssize_t io61_pwrite(io61_file* f, const unsigned char* buf, size_t sz,
     return ncopy;
 }
 
-
 // io61_pfill(f, off)
 //    Fill the single-slot cache with data including offset `off`.
 //    The handout code rounds `off` down to a multiple of 8192.
 
-static int io61_pfill(io61_file* f, off_t off) {
+// assuming this is only called internally in pwrite and pread
+static int io61_pfill(io61_file *f, off_t off)
+{
     assert(f->mode == O_RDWR);
-    if (f->dirty && io61_flush(f) == -1) {
+    if (f->dirty && io61_flush_internal(f) == -1)
+    {
         return -1;
     }
 
     off = off - (off % 8192);
     ssize_t nr = pread(f->fd, f->cbuf, f->cbufsz, off);
-    if (nr == -1) {
+    if (nr == -1)
+    {
         return -1;
     }
     f->tag = off;
@@ -381,8 +455,6 @@ static int io61_pfill(io61_file* f, off_t off) {
     f->positioned = true;
     return 0;
 }
-
-
 
 // FILE LOCKING FUNCTIONS
 
@@ -399,20 +471,23 @@ static int io61_pfill(io61_file* f, off_t off) {
 //    attempt to lock overlapping offset ranges. Threads in our test programs
 //    always lock nonoverlapping ranges.
 
-int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
+int io61_try_lock(io61_file *f, off_t off, off_t len, int locktype)
+{
     assert(off >= 0 && len >= 0);
     assert(locktype == LOCK_EX);
-    if (len == 0) {
+    if (len == 0)
+    {
         return 0;
     }
     // use mutex lock
     std::unique_lock<std::mutex> guard(f->table_mutex);
 
     // check if range is unoccupied
-    for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it) {
-        const range_lock& rl = *it;
+    for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it)
+    {
+        const range_lock &rl = *it;
         // if it is, then return an error
-        if (range_checker(rl, off, len)) 
+        if (range_checker(rl, off, len))
         {
             errno = EAGAIN;
             return -1;
@@ -426,9 +501,7 @@ int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
     f->lock_table.push_back(rl);
     // return 0
     return 0;
-    
 }
-
 
 // io61_lock(f, off, len, locktype)
 //    Acquire a lock on offsets `[off, off + len)` in file `f`.
@@ -440,23 +513,27 @@ int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
 //    error conditions, such as EDEADLK (a deadlock was detected). Note that
 //    your code need not detect deadlock.
 
-int io61_lock(io61_file* f, off_t off, off_t len, int locktype) {
+int io61_lock(io61_file *f, off_t off, off_t len, int locktype)
+{
     assert(off >= 0 && len >= 0);
     assert(locktype == LOCK_EX);
-    if (len == 0) {
+    if (len == 0)
+    {
         return 0;
     }
     // use mutex lock
     std::unique_lock<std::mutex> guard(f->table_mutex);
 
     // keep going until we don't find the range in the table
-    while (true){
+    while (true)
+    {
         bool exists = false;
         // check if range is unoccupied
-        for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it) {
-            const range_lock& rl = *it;
+        for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it)
+        {
+            const range_lock &rl = *it;
             // if it is, then return an error
-            if (range_checker(rl, off, len)) 
+            if (range_checker(rl, off, len))
             {
                 exists = true;
             }
@@ -478,15 +555,16 @@ int io61_lock(io61_file* f, off_t off, off_t len, int locktype) {
     }
 }
 
-
 // io61_unlock(f, off, len)
 //    Release the lock on offsets `[off, off + len)` in file `f`.
 //    Returns 0 on success and -1 on error. The calling thread must have
 //    previously acquired a lock on that offset range.
 
-int io61_unlock(io61_file* f, off_t off, off_t len) {
+int io61_unlock(io61_file *f, off_t off, off_t len)
+{
     assert(off >= 0 && len >= 0);
-    if (len == 0) {
+    if (len == 0)
+    {
         return 0;
     }
 
@@ -496,21 +574,19 @@ int io61_unlock(io61_file* f, off_t off, off_t len) {
     // iterate through and look for that exact range
     // check if range is unoccupied
     std::thread::id curr_id = std::this_thread::get_id();
-    for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it) 
+    for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it)
     {
-        const range_lock& rl = *it;
+        const range_lock &rl = *it;
         if (rl.off == off && rl.len == len && rl.thread_id == curr_id)
         {
             f->lock_table.erase(it);
             f->run_threads.notify_all();
             return 0;
-        }    
+        }
     }
     // no need to account for undefined behaviour
     return 0;
 }
-
-
 
 // HELPER FUNCTIONS
 // You shouldn't need to change these functions.
@@ -521,41 +597,51 @@ int io61_unlock(io61_file* f, off_t off, off_t len) {
 //    standard output, depending on `mode`. Exits with an error message if
 //    `filename != nullptr` and the named file cannot be opened.
 
-io61_file* io61_open_check(const char* filename, int mode) {
+io61_file *io61_open_check(const char *filename, int mode)
+{
     int fd;
-    if (filename) {
+    if (filename)
+    {
         fd = open(filename, mode, 0666);
-    } else if ((mode & O_ACCMODE) == O_RDONLY) {
+    }
+    else if ((mode & O_ACCMODE) == O_RDONLY)
+    {
         fd = STDIN_FILENO;
-    } else {
+    }
+    else
+    {
         fd = STDOUT_FILENO;
     }
-    if (fd < 0) {
+    if (fd < 0)
+    {
         fprintf(stderr, "%s: %s\n", filename, strerror(errno));
         exit(1);
     }
     return io61_fdopen(fd, mode & O_ACCMODE);
 }
 
-
 // io61_fileno(f)
 //    Returns the file descriptor associated with `f`.
 
-int io61_fileno(io61_file* f) {
+int io61_fileno(io61_file *f)
+{
     return f->fd;
 }
-
 
 // io61_filesize(f)
 //    Returns the size of `f` in bytes. Returns -1 if `f` does not have a
 //    well-defined size (for instance, if it is a pipe).
 
-off_t io61_filesize(io61_file* f) {
+off_t io61_filesize(io61_file *f)
+{
     struct stat s;
     int r = fstat(f->fd, &s);
-    if (r >= 0 && S_ISREG(s.st_mode)) {
+    if (r >= 0 && S_ISREG(s.st_mode))
+    {
         return s.st_size;
-    } else {
+    }
+    else
+    {
         return -1;
     }
 }

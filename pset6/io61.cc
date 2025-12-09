@@ -18,6 +18,7 @@ struct range_lock
     off_t off;
     off_t len;
     std::thread::id thread_id;
+    int lock_type;
 };
 
 struct io61_file
@@ -474,7 +475,6 @@ static int io61_pfill(io61_file *f, off_t off)
 int io61_try_lock(io61_file *f, off_t off, off_t len, int locktype)
 {
     assert(off >= 0 && len >= 0);
-    assert(locktype == LOCK_EX);
     if (len == 0)
     {
         return 0;
@@ -482,25 +482,32 @@ int io61_try_lock(io61_file *f, off_t off, off_t len, int locktype)
     // use mutex lock
     std::unique_lock<std::mutex> guard(f->table_mutex);
 
-    // check if range is unoccupied
-    for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it)
+    if (locktype == LOCK_EX)
     {
-        const range_lock &rl = *it;
-        // if it is, then return an error
-        if (range_checker(rl, off, len))
+        // check if range is unoccupied
+        for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it)
         {
-            errno = EAGAIN;
-            return -1;
+            const range_lock &rl = *it;
+            // if it is, then return an error
+            if (range_checker(rl, off, len))
+            {
+                errno = EAGAIN;
+                return -1;
+            }
         }
+        // else add it to lock_table
+        range_lock rl;
+        rl.len = len;
+        rl.off = off;
+        rl.thread_id = std::this_thread::get_id();
+        f->lock_table.push_back(rl);
+        // return 0
+        return 0;
     }
-    // else add it to lock_table
-    range_lock rl;
-    rl.len = len;
-    rl.off = off;
-    rl.thread_id = std::this_thread::get_id();
-    f->lock_table.push_back(rl);
-    // return 0
-    return 0;
+    else
+    {
+
+    } 
 }
 
 // io61_lock(f, off, len, locktype)
@@ -516,42 +523,47 @@ int io61_try_lock(io61_file *f, off_t off, off_t len, int locktype)
 int io61_lock(io61_file *f, off_t off, off_t len, int locktype)
 {
     assert(off >= 0 && len >= 0);
-    assert(locktype == LOCK_EX);
     if (len == 0)
     {
         return 0;
     }
     // use mutex lock
     std::unique_lock<std::mutex> guard(f->table_mutex);
-
-    // keep going until we don't find the range in the table
-    while (true)
+    if (locktype == LOCK_EX)
     {
-        bool exists = false;
-        // check if range is unoccupied
-        for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it)
+        // keep going until we don't find the range in the table
+        while (true)
         {
-            const range_lock &rl = *it;
-            // if it is, then return an error
-            if (range_checker(rl, off, len))
+            bool exists = false;
+            // check if range is unoccupied
+            for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it)
             {
-                exists = true;
+                const range_lock &rl = *it;
+                // if it is, then return an error
+                if (range_checker(rl, off, len))
+                {
+                    exists = true;
+                }
             }
-        }
 
-        // add the range and return 0
-        if (!exists)
-        {
-            range_lock rl;
-            rl.len = len;
-            rl.off = off;
-            rl.thread_id = std::this_thread::get_id();
-            f->lock_table.push_back(rl);
-            return 0;
-        }
+            // add the range and return 0
+            if (!exists)
+            {
+                range_lock rl;
+                rl.len = len;
+                rl.off = off;
+                rl.thread_id = std::this_thread::get_id();
+                f->lock_table.push_back(rl);
+                return 0;
+            }
 
-        // else wait for any change to occur
-        f->run_threads.wait(guard);
+            // else wait for any change to occur
+            f->run_threads.wait(guard);
+        }
+    }
+    else
+    {
+
     }
 }
 

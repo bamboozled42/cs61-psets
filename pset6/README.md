@@ -7,8 +7,9 @@ collaborators, in `AUTHORS.md`.
 
 Grading notes (if any)
 ----------------------
-
+I had to make a new repo for this assingment due to merging errors. Not sure what complications that will create when looking through the commit history.
 
 
 Extra credit attempted (if any)
 -------------------------------
+Attempting implementing shared locks (currently incomplete)

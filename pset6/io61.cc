@@ -6,13 +6,20 @@
 #include <condition_variable>
 #include <sys/types.h>
 #include <sys/stat.h>
-
+#include <thread>
 // io61.cc
 //    YOUR CODE HERE!
 
 
 // io61_file
 //    Data structure for io61 file wrappers.
+
+struct range_lock{
+    off_t off; 
+    off_t len;
+    std::thread::id thread_id;
+};
+
 
 struct io61_file {
     int fd = -1;     // file descriptor
@@ -31,9 +38,25 @@ struct io61_file {
     std::atomic <bool> dirty{false};       // has cache been written?
     bool positioned = false;  // is cache in positioned mode?
 
-    // add the recursive mutex object
-    std::recursive_mutex file_mutex;
+    // no need for recursive mutex for a table
+    std::mutex table_mutex;
+    // make a condition variable
+    std::condition_variable_any run_threads;
+    std::vector<range_lock> lock_table;
 };
+
+// add a helper function to check if it falls within a range
+bool range_checker(range_lock existing_range, off_t curr_off, off_t curr_len){
+    off_t curr_end = curr_off + curr_len;
+    off_t existing_end = existing_range.off + existing_range.len;
+
+    // no overlap condition
+    if (curr_end <= existing_range.off || existing_end <= curr_off) {
+        return false;   
+    } else {
+        return true;
+    }
+}
 
 
 // io61_fdopen(fd, mode)
@@ -377,18 +400,33 @@ static int io61_pfill(io61_file* f, off_t off) {
 //    always lock nonoverlapping ranges.
 
 int io61_try_lock(io61_file* f, off_t off, off_t len, int locktype) {
-    (void) f;
     assert(off >= 0 && len >= 0);
     assert(locktype == LOCK_EX);
     if (len == 0) {
         return 0;
     }
-    if (f->file_mutex.try_lock()){
-        return 0;
+    // use mutex lock
+    std::unique_lock<std::mutex> guard(f->table_mutex);
+
+    // check if range is unoccupied
+    for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it) {
+        const range_lock& rl = *it;
+        // if it is, then return an error
+        if (range_checker(rl, off, len)) 
+        {
+            errno = EAGAIN;
+            return -1;
+        }
     }
-    else{
-        return -1;
-    }
+    // else add it to lock_table
+    range_lock rl;
+    rl.len = len;
+    rl.off = off;
+    rl.thread_id = std::this_thread::get_id();
+    f->lock_table.push_back(rl);
+    // return 0
+    return 0;
+    
 }
 
 
@@ -408,11 +446,36 @@ int io61_lock(io61_file* f, off_t off, off_t len, int locktype) {
     if (len == 0) {
         return 0;
     }
-    // The handout code polls using `io61_try_lock`.
-    while (io61_try_lock(f, off, len, locktype) != 0) {
-        
+    // use mutex lock
+    std::unique_lock<std::mutex> guard(f->table_mutex);
+
+    // keep going until we don't find the range in the table
+    while (true){
+        bool exists = false;
+        // check if range is unoccupied
+        for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it) {
+            const range_lock& rl = *it;
+            // if it is, then return an error
+            if (range_checker(rl, off, len)) 
+            {
+                exists = true;
+            }
+        }
+
+        // add the range and return 0
+        if (!exists)
+        {
+            range_lock rl;
+            rl.len = len;
+            rl.off = off;
+            rl.thread_id = std::this_thread::get_id();
+            f->lock_table.push_back(rl);
+            return 0;
+        }
+
+        // else wait for any change to occur
+        f->run_threads.wait(guard);
     }
-    return 0;
 }
 
 
@@ -422,13 +485,28 @@ int io61_lock(io61_file* f, off_t off, off_t len, int locktype) {
 //    previously acquired a lock on that offset range.
 
 int io61_unlock(io61_file* f, off_t off, off_t len) {
-    (void) f;
     assert(off >= 0 && len >= 0);
     if (len == 0) {
         return 0;
     }
+
+    // use mutex lock
+    std::unique_lock<std::mutex> guard(f->table_mutex);
+
+    // iterate through and look for that exact range
+    // check if range is unoccupied
+    std::thread::id curr_id = std::this_thread::get_id();
+    for (auto it = f->lock_table.begin(); it != f->lock_table.end(); ++it) 
+    {
+        const range_lock& rl = *it;
+        if (rl.off == off && rl.len == len && rl.thread_id == curr_id)
+        {
+            f->lock_table.erase(it);
+            f->run_threads.notify_all();
+            return 0;
+        }    
+    }
     // no need to account for undefined behaviour
-    f->file_mutex.unlock();
     return 0;
 }
 
